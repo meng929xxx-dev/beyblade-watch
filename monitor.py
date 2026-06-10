@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Funbox BEYBLADE X 新品監控（GitHub Actions 免費雲端版）
+"""Funbox BEYBLADE X 新品＋補貨監控（GitHub Actions 雲端長跑版）
 
-流程：
-1. 用無頭瀏覽器開啟 Funbox 官方商城「戰鬥陀螺」分類頁（含分頁）
-2. 收集所有商品網址與名稱
-3. 與 known_products.json（上次清單）比對
-4. 有新品 → 透過 LINE 與 Email 通知
-5. 更新 known_products.json（由 workflow 自動 commit 回倉庫）
+運作方式（配合官網「5 的倍數分鐘上架」的規律）：
+- workflow 每 30 分鐘啟動一個 job，每個 job 連續跑 LOOP_MINUTES 分鐘（接力覆蓋全天）
+- job 內平時待機，每逢 5 分整點（XX:00、XX:05…）前 20 秒進入衝刺：
+  每 10 秒掃一次類別頁，持續到整點後 100 秒
+- 偵測兩種事件，LINE＋Email 通知（不自動下單）：
+  1. 新品：沒見過的商品網址出現
+  2. 補貨：見過的商品重新出現在架上（Funbox 賣完會下架）
+- 名稱含「預購」或「售完」的不通知
 """
 import json
 import os
 import smtplib
 import ssl
 import sys
+import time as time_mod
+from datetime import datetime
 from email.header import Header
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -22,51 +26,62 @@ from playwright.sync_api import sync_playwright
 
 BASE = "https://shop.funbox.com.tw"
 CATEGORY_URL = f"{BASE}/categories/takaratomy/beyblade"
-STATE_FILE = Path("known_products.json")
+KNOWN_FILE = Path("known_products.json")    # 看過的所有商品 {url: name}
+LISTED_FILE = Path("listed_state.json")     # 上一輪「正在架上」的網址清單
 MAX_PAGES = 10
+
+LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "0"))  # 0 = 只掃一輪（手動測試）
+BURST_BEFORE = 20    # 5 分整點前幾秒開始衝刺
+BURST_AFTER = 100    # 整點後再持續幾秒
+BURST_EVERY = 10     # 衝刺期間每幾秒掃一次
+
+SOLDOUT_HINTS = ["售完", "補貨中", "已售完", "sold out"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
 
 
-def scrape_products() -> dict:
-    """回傳 {商品網址: 商品名稱}"""
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def scrape_products(page):
+    """回傳 (可購商品dict, 原始連結數)。排除預購與標示售完者。"""
     products: dict[str, str] = {}
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        ctx = browser.new_context(user_agent=UA, locale="zh-TW")
-        page = ctx.new_page()
-        for n in range(1, MAX_PAGES + 1):
-            page.goto(f"{CATEGORY_URL}?page={n}",
-                      wait_until="domcontentloaded", timeout=60_000)
-            try:
-                page.wait_for_selector("a[href*='/products/']", timeout=20_000)
-            except Exception:
-                break  # 此頁沒有商品 → 結束
-            page.wait_for_timeout(2_000)  # 等動態內容載完
-            links = page.eval_on_selector_all(
-                "a[href*='/products/']",
-                "els => els.map(e => ({href: e.href, "
-                "text: (e.innerText || '').replace(/\\s+/g, ' ').trim()}))",
-            )
-            page_items: dict[str, str] = {}
-            for item in links:
-                href = item["href"].split("?")[0].rstrip("/")
-                if "/products/" not in href:
-                    continue
-                name = item["text"]
-                if "預購" in name:
-                    continue  # 跳過先行預購／預購商品
-                if href not in page_items or len(name) > len(page_items[href]):
-                    page_items[href] = name
-            new_keys = set(page_items) - set(products)
-            for k, v in page_items.items():
-                if k not in products or len(v) > len(products[k]):
-                    products[k] = v
-            if not new_keys:
-                break  # 頁面內容重複 → 已到最後一頁
-        browser.close()
-    return products
+    raw_count = 0
+    for n in range(1, MAX_PAGES + 1):
+        page.goto(f"{CATEGORY_URL}?page={n}",
+                  wait_until="domcontentloaded", timeout=60_000)
+        try:
+            page.wait_for_selector("a[href*='/products/']", timeout=15_000)
+        except Exception:
+            break
+        page.wait_for_timeout(1_200)
+        links = page.eval_on_selector_all(
+            "a[href*='/products/']",
+            "els => els.map(e => ({href: e.href, "
+            "text: (e.innerText || '').replace(/\\s+/g, ' ').trim()}))",
+        )
+        raw_count += len(links)
+        page_items: dict[str, str] = {}
+        for item in links:
+            href = item["href"].split("?")[0].rstrip("/")
+            if "/products/" not in href:
+                continue
+            name = item["text"]
+            if "預購" in name:
+                continue
+            if any(s in name.lower() for s in SOLDOUT_HINTS):
+                continue
+            if href not in page_items or len(name) > len(page_items[href]):
+                page_items[href] = name
+        new_keys = set(page_items) - set(products)
+        for k, v in page_items.items():
+            if k not in products or len(v) > len(products[k]):
+                products[k] = v
+        if not new_keys:
+            break
+    return products, raw_count
 
 
 def notify_line(text: str) -> None:
@@ -103,44 +118,93 @@ def notify_email(subject: str, body: str) -> None:
     print(f"Email 已寄出至 {to_addr}")
 
 
-def main() -> None:
-    products = scrape_products()
-    print(f"本次抓到 {len(products)} 項商品")
-    if not products:
-        print("⚠️ 沒抓到任何商品（網站可能暫時擋爬或改版），本次不更動清單。")
-        return
+def load_json(path: Path, default):
+    if path.exists():
+        return json.loads(path.read_text("utf-8"))
+    return default
 
-    if not STATE_FILE.exists():
-        STATE_FILE.write_text(
-            json.dumps(products, ensure_ascii=False, indent=2), "utf-8")
-        msg = (f"✅ 戰鬥陀螺監控已啟動！\n已建立基準清單，"
-               f"目前 Funbox 官方商城共 {len(products)} 項商品。\n"
-               f"之後有新上架會立刻通知你。")
-        notify_line(msg)
-        notify_email("✅ 戰鬥陀螺監控已啟動", msg)
-        return
 
-    known = json.loads(STATE_FILE.read_text("utf-8"))
-    new_items = {u: n for u, n in products.items() if u not in known}
+def save_json(path: Path, data) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
-    # 合併後寫回（保留舊紀錄，避免暫時抓不到的商品被誤判為之後的新品）
+
+def check_once(page, known: dict, listed_prev: set, baseline: bool):
+    """掃一輪；回傳 (新的 listed set, 是否成功)。發現新品/補貨即通知。"""
+    products, raw = scrape_products(page)
+    if raw == 0:
+        log("⚠️ 連結數 0，疑似被擋或網站異常，跳過本輪")
+        return listed_prev, False
+    listed_now = set(products)
+    if baseline:
+        log(f"建立基準：架上 {len(listed_now)} 件可購商品")
+    else:
+        appeared = listed_now - listed_prev
+        if appeared:
+            lines = []
+            for url in sorted(appeared):
+                name = products[url]
+                kind = "補貨" if url in known else "新品"
+                log(f"🆕 {kind}：{name} {url}")
+                lines.append(f"🆕【{kind}】{name}")
+                lines.append(url)
+                lines.append("")
+            msg = "\n".join(lines).strip()
+            notify_line(msg)
+            notify_email(f"🆕 戰鬥陀螺 上架通知 x{len(appeared)}（Funbox）", msg)
+        else:
+            log(f"無變化（架上 {len(listed_now)} 件）")
     known.update(products)
-    STATE_FILE.write_text(
-        json.dumps(known, ensure_ascii=False, indent=2), "utf-8")
+    save_json(KNOWN_FILE, known)
+    save_json(LISTED_FILE, sorted(listed_now))
+    return listed_now, True
 
-    if not new_items:
-        print("無新品。")
-        return
 
-    lines = [f"🆕 Funbox 上架 {len(new_items)} 件戰鬥陀螺新品！", ""]
-    for url, name in new_items.items():
-        lines.append(f"▶ {name or '（名稱待確認）'}")
-        lines.append(url)
-        lines.append("")
-    msg = "\n".join(lines).strip()
-    print(msg)
-    notify_line(msg)
-    notify_email(f"🆕 戰鬥陀螺新品 x{len(new_items)}（Funbox 官方）", msg)
+def seconds_to_next_mark() -> float:
+    """距離下一個 5 分整點的秒數"""
+    return 300 - (time_mod.time() % 300)
+
+
+def main() -> None:
+    known: dict = load_json(KNOWN_FILE, {})
+    listed_raw = load_json(LISTED_FILE, None)
+    baseline = listed_raw is None
+    listed_prev: set = set(listed_raw or [])
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        ctx = browser.new_context(user_agent=UA, locale="zh-TW")
+        page = ctx.new_page()
+
+        # 啟動先掃一輪（建立基準或接上前一個 job 的進度）
+        listed_prev, _ = check_once(page, known, listed_prev, baseline)
+        baseline = False
+
+        if LOOP_MINUTES <= 0:
+            browser.close()
+            return
+
+        deadline = time_mod.time() + LOOP_MINUTES * 60
+        log(f"長跑模式 {LOOP_MINUTES} 分鐘：5 分整點前 {BURST_BEFORE}s 起每 "
+            f"{BURST_EVERY}s 衝刺，至整點後 {BURST_AFTER}s")
+        while time_mod.time() < deadline:
+            wait = seconds_to_next_mark() - BURST_BEFORE
+            if wait > 0:
+                time_mod.sleep(min(wait, max(deadline - time_mod.time(), 0)))
+            if time_mod.time() >= deadline:
+                break
+            burst_end = min(time_mod.time() + BURST_BEFORE + BURST_AFTER, deadline)
+            log("⚡ 進入衝刺時段")
+            while time_mod.time() < burst_end:
+                t0 = time_mod.time()
+                try:
+                    listed_prev, _ = check_once(page, known, listed_prev, False)
+                except Exception as e:
+                    log(f"掃描錯誤：{e}")
+                elapsed = time_mod.time() - t0
+                if (rest := BURST_EVERY - elapsed) > 0:
+                    time_mod.sleep(min(rest, max(burst_end - time_mod.time(), 0)))
+        browser.close()
+        log("本輪 job 結束，等待下一棒接力")
 
 
 if __name__ == "__main__":
