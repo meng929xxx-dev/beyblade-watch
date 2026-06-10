@@ -3,8 +3,8 @@ name: Beyblade X Monitor
 
 on:
   schedule:
-    # GitHub 用 UTC 時間；台灣 08:00–24:00 = UTC 00:00–16:00，每 15 分鐘一次
-    - cron: "*/15 0-15 * * *"
+    # GitHub 用 UTC 時間；台灣 08:00–24:00 = UTC 00:00–16:00，每 5 分鐘一次
+    - cron: "*/5 0-15 * * *"
   workflow_dispatch: {}   # 允許手動執行（測試用）
 
 permissions:
