@@ -55,6 +55,8 @@ def scrape_products() -> dict:
                 if "/products/" not in href:
                     continue
                 name = item["text"]
+                if "預購" in name:
+                    continue  # 跳過先行預購／預購商品
                 if href not in page_items or len(name) > len(page_items[href]):
                     page_items[href] = name
             new_keys = set(page_items) - set(products)
