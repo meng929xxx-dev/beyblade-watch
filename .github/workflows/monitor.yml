@@ -3,20 +3,22 @@ name: Beyblade X Monitor
 
 on:
   schedule:
-    # GitHub 用 UTC 時間；台灣 08:00–24:00 = UTC 00:00–16:00，每 5 分鐘一次
-    - cron: "*/5 0-15 * * *"
+    # GitHub 用 UTC；台灣 08:00–24:00 = UTC 00:00–16:00
+    # 每 30 分鐘啟動一棒，每棒連續跑 35 分鐘（衝刺邏輯在 monitor.py 內）→ 接力覆蓋全天
+    - cron: "*/30 0-15 * * *"
   workflow_dispatch: {}   # 允許手動執行（測試用）
 
 permissions:
-  contents: write         # 允許把更新後的商品清單存回倉庫
+  contents: write         # 允許把商品清單狀態存回倉庫
 
 concurrency:
   group: monitor
-  cancel-in-progress: false
+  cancel-in-progress: false   # 新的一棒排隊等舊的跑完，無縫接力
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -29,8 +31,9 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 執行監控
+      - name: 執行監控（長跑 35 分鐘）
         env:
+          LOOP_MINUTES: "35"
           LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
@@ -38,9 +41,11 @@ jobs:
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python monitor.py
 
-      - name: 儲存商品清單
+      - name: 儲存商品清單狀態
+        if: always()
         run: |
           git config user.name "beyblade-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add known_products.json || true
-          git diff --cached --quiet || (git commit -m "更新商品清單" && git push)
+          git pull --rebase || true
+          git add known_products.json listed_state.json || true
+          git diff --cached --quiet || (git commit -m "更新商品狀態" && git push)
