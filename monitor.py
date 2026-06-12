@@ -28,6 +28,8 @@ BASE = "https://shop.funbox.com.tw"
 CATEGORY_URL = f"{BASE}/categories/takaratomy/beyblade"
 KNOWN_FILE = Path("known_products.json")    # 看過的所有商品 {url: name}
 LISTED_FILE = Path("listed_state.json")     # 上一輪「正在架上」的網址清單
+QUOTA_FILE = Path("line_quota.json")        # LINE 當月已發送則數 {"month": "2026-06", "count": N}
+LINE_MONTHLY_LIMIT = 200                    # LINE 免費額度硬上限：當月滿 200 則後只寄 Email
 MAX_PAGES = 10
 
 LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "0"))  # 0 = 只掃一輪（手動測試）
@@ -91,6 +93,15 @@ def notify_line(text: str) -> None:
     if not token or not user_id:
         print("（未設定 LINE 金鑰，略過 LINE 通知）")
         return
+    # 硬上限：當月已發滿 LINE_MONTHLY_LIMIT 則就不再打 LINE API（Email 照寄）
+    month = datetime.now().strftime("%Y-%m")
+    quota = load_json(QUOTA_FILE, {})
+    if quota.get("month") != month:
+        quota = {"month": month, "count": 0}   # 跨月自動歸零
+    if quota["count"] >= LINE_MONTHLY_LIMIT:
+        print(f"⚠️ LINE 本月已發 {quota['count']} 則，達上限 "
+              f"{LINE_MONTHLY_LIMIT}，本則改僅寄 Email")
+        return
     r = requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Authorization": f"Bearer {token}"},
@@ -99,6 +110,10 @@ def notify_line(text: str) -> None:
         timeout=30,
     )
     print(f"LINE 通知結果：{r.status_code} {r.text[:200]}")
+    if r.status_code == 200:
+        quota["count"] += 1
+        save_json(QUOTA_FILE, quota)
+        print(f"LINE 本月用量：{quota['count']}/{LINE_MONTHLY_LIMIT}")
 
 
 def notify_email(subject: str, body: str) -> None:
