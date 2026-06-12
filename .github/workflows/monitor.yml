@@ -3,9 +3,10 @@ name: Beyblade X Monitor
 
 on:
   schedule:
-    # GitHub 用 UTC；台灣 08:00–24:00 = UTC 00:00–16:00
-    # 每 30 分鐘啟動一棒，每棒連續跑 35 分鐘（衝刺邏輯在 monitor.py 內）→ 接力覆蓋全天
-    - cron: "*/30 0-15 * * *"
+    # 備援用：GitHub cron 會大量丟棄觸發（實測一天只剩 2~3 次），不能依賴。
+    # 正常運作靠「自我接力」：每棒結束前用 CHAIN_TOKEN 派發下一棒（API 派發不會被丟棄）。
+    # cron 只負責「斷鏈後把鏈重新點燃」。選 7,37 分避開壅塞的整點/半點。
+    - cron: "7,37 0-15 * * *"
   workflow_dispatch:      # 手動執行（測試用）
     inputs:
       test_mode:
@@ -18,7 +19,7 @@ permissions:
 
 concurrency:
   group: monitor
-  cancel-in-progress: false   # 新的一棒排隊等舊的跑完，無縫接力
+  cancel-in-progress: false   # 同時只跑一棒，多的觸發自動丟棄 → 不會重複通知
 
 jobs:
   monitor:
@@ -55,3 +56,25 @@ jobs:
           git pull --rebase || true
           git add known_products.json listed_state.json || true
           git diff --cached --quiet || (git commit -m "更新商品狀態" && git push)
+
+      - name: 自我接力：派發下一棒
+        if: ${{ always() && inputs.test_mode != true }}
+        env:
+          CHAIN_TOKEN: ${{ secrets.CHAIN_TOKEN }}
+        run: |
+          H=$(TZ=Asia/Taipei date +%H)
+          # 台灣 08:00 前不接力（半夜休息），早上由 cron 備援重新點燃
+          if [ "$H" -lt 8 ]; then
+            echo "台灣時間 ${H} 點，夜間休息，不派發下一棒"
+            exit 0
+          fi
+          if [ -z "$CHAIN_TOKEN" ]; then
+            echo "⚠️ 未設定 CHAIN_TOKEN secret，無法自我接力，只能靠不可靠的 cron 備援！"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $CHAIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/monitor.yml/dispatches" \
+            -d '{"ref":"main"}')
+          echo "派發下一棒 HTTP $code"
