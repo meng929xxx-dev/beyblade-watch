@@ -26,9 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -53,10 +53,13 @@ jobs:
         run: |
           git config user.name "beyblade-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add known_products.json listed_state.json || true
+          git add known_products.json listed_state.json line_quota.json || true
           if ! git diff --cached --quiet; then
             git commit -m "更新商品狀態"
-            git push || (git pull --rebase && git push) || echo "⚠️ 狀態推送失敗，下一棒可能重複通知一次"
+            # 先把遠端新 commit 拉下來再推；--autostash 自動暫存其他未提交變更，
+            # 避免「cannot pull with rebase: You have unstaged changes」
+            git pull --rebase --autostash || true
+            git push || (git pull --rebase --autostash && git push) || echo "⚠️ 狀態推送失敗，下一棒可能重複通知一次"
           fi
 
       - name: 自我接力：派發下一棒
