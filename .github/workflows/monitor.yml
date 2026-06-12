@@ -53,21 +53,18 @@ jobs:
         run: |
           git config user.name "beyblade-bot"
           git config user.email "bot@users.noreply.github.com"
-          git pull --rebase || true
           git add known_products.json listed_state.json || true
-          git diff --cached --quiet || (git commit -m "更新商品狀態" && git push)
+          if ! git diff --cached --quiet; then
+            git commit -m "更新商品狀態"
+            git push || (git pull --rebase && git push) || echo "⚠️ 狀態推送失敗，下一棒可能重複通知一次"
+          fi
 
       - name: 自我接力：派發下一棒
         if: ${{ always() && inputs.test_mode != true }}
         env:
           CHAIN_TOKEN: ${{ secrets.CHAIN_TOKEN }}
         run: |
-          H=$(TZ=Asia/Taipei date +%H)
-          # 台灣 08:00 前不接力（半夜休息），早上由 cron 備援重新點燃
-          if [ "$H" -lt 8 ]; then
-            echo "台灣時間 ${H} 點，夜間休息，不派發下一棒"
-            exit 0
-          fi
+          # 24 小時自我接力，不依賴不可靠的 cron；要停用整條鏈：Actions → Disable workflow
           if [ -z "$CHAIN_TOKEN" ]; then
             echo "⚠️ 未設定 CHAIN_TOKEN secret，無法自我接力，只能靠不可靠的 cron 備援！"
             exit 0
