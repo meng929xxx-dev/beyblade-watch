@@ -72,9 +72,9 @@ jobs:
             echo "⚠️ 未設定 CHAIN_TOKEN secret，無法自我接力，只能靠不可靠的 cron 備援！"
             exit 0
           fi
-          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+          code=$(curl -s --max-time 25 --retry 4 --retry-delay 5 --retry-all-errors -o /dev/null -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $CHAIN_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/monitor.yml/dispatches" \
-            -d '{"ref":"main"}')
+            -d '{"ref":"main"}' || echo "000")
           echo "派發下一棒 HTTP $code"
